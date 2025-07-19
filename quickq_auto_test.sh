@@ -4,7 +4,7 @@
 APP_NAME="QuickQ For Mac"
 APP_PATH="/Applications/QuickQ For Mac.app"
 MAX_RETRY=3
-RESTART_INTERVAL=7200  # 4小时（秒）
+RESTART_INTERVAL=7200  # 2小时（秒）
 APP_CHECK_INTERVAL=20   # 应用检测间隔（秒）
 VPN_CHECK_INTERVAL=600  # VPN检测间隔（秒）
 
