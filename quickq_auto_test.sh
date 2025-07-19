@@ -6,7 +6,7 @@ APP_PATH="/Applications/QuickQ For Mac.app"
 MAX_RETRY=3
 RESTART_INTERVAL=7200  # 2小时（秒）
 APP_CHECK_INTERVAL=20   # 应用检测间隔（秒）
-VPN_CHECK_INTERVAL=600  # VPN检测间隔（秒）
+VPN_CHECK_INTERVAL=300  # VPN检测间隔（秒）
 
 # 按钮坐标（根据您的实际设置）
 SETTINGS_BUTTON_X=1869
@@ -18,7 +18,7 @@ CONNECT_BUTTON_Y=260
 
 # ===== 状态变量 =====
 retry_count=0
-is_fresh_start=false
+is_fresh_start=true  # 初始状态设为首次启动
 last_restart_time=$(date +%s)
 last_app_check_time=0
 last_vpn_check_time=0
@@ -44,9 +44,8 @@ EOF
     log "✅ 窗口调整完成"
 }
 
-# ===== VPN 检测函数 =====
 check_vpn_connection() {
-    echo "[$(date +'%T')] 🔍 启动VPN通道检测..."
+    log "🔍 启动VPN通道检测..."
     local start_time=$(date +%s)
     local success=false
 
@@ -59,14 +58,14 @@ check_vpn_connection() {
     # 遍历检测所有端点
     for url in "${endpoints[@]}"; do
         domain=$(echo "$url" | awk -F/ '{print $3}')
-        echo "[$(date +'%T')]   🌐 正在测试 $domain ..."
+        log "  🌐 正在测试 $domain ..."
         
         if curl --max-time 10 --silent --fail "$url" >/dev/null; then
-            echo "[$(date +'%T')]   ✅ $domain 检测通过 (204)"
+            log "  ✅ $domain 检测通过 (204)"
             success=true
             break
         else
-            echo "[$(date +'%T')]   ❌ $domain 检测失败 (curl代码: $?)"
+            log "  ❌ $domain 检测失败 (curl代码: $?)"
         fi
     done
 
@@ -74,10 +73,10 @@ check_vpn_connection() {
     local elapsed=$((end_time - start_time))
 
     if $success; then
-        echo "[$(date +'%T')] 🟢 VPN通道正常 (耗时: ${elapsed}s)"
+        log "🟢 VPN通道正常 (耗时: ${elapsed}s)"
         return 0
     else
-        echo "[$(date +'%T')] 🔴 VPN通道异常 (总耗时: ${elapsed}s)"
+        log "🔴 VPN通道异常 (总耗时: ${elapsed}s)"
         return 1
     fi
 }
@@ -162,7 +161,24 @@ while :; do
         continue
     fi
     
-    # 3. 应用运行检测
+    # 3. 首次启动特殊处理
+    if $is_fresh_start; then
+        if [ $retry_count -ge $MAX_RETRY ]; then
+            log "⚠️ 首次启动达到最大重试次数，强制重启..."
+            force_restart
+        else
+            if ! check_vpn_connection; then
+                log "🔄 首次启动VPN未连接，尝试连接 ($((retry_count+1))/$MAX_RETRY)..."
+                connect_procedure
+            else
+                is_fresh_start=false
+            fi
+        fi
+        sleep 5
+        continue  # 跳过常规检测，直接进入下一次循环
+    fi
+    
+    # 4. 常规运行状态检测（非首次启动）
     if [ $((current_time - last_app_check_time)) -ge $APP_CHECK_INTERVAL ]; then
         log "🔍 开始应用运行状态检测..."
         last_app_check_time=$(date +%s)
@@ -171,41 +187,28 @@ while :; do
             log "❌ 检测到应用未运行，正在启动..."
             open "$APP_PATH"
             sleep 10
-            is_fresh_start=true
+            is_fresh_start=true  # 应用重启视为首次启动
             retry_count=0
-            connect_procedure
             continue
         else
             log "✔️ 应用运行正常"
         fi
     fi
     
-    # 4. VPN状态检测
+    # 5. VPN状态检测（非首次启动）
     if [ $((current_time - last_vpn_check_time)) -ge $VPN_CHECK_INTERVAL ]; then
         log "🌐 开始VPN连接状态检测..."
         last_vpn_check_time=$(date +%s)
         
         if ! check_vpn_connection; then
-            if $is_fresh_start; then
-                # 新启动应用：给3次连接机会
-                if [ $retry_count -lt $MAX_RETRY ]; then
-                    log "🔄 新启动应用连接失败，立即重试 ($((retry_count+1))/$MAX_RETRY)..."
-                    connect_procedure
-                else
-                    log "⚠️ 达到最大重试次数，强制重启..."
-                    force_restart
-                fi
-            else
-                # 运行中检测失败：直接重启
-                log "🏃 运行中检测到VPN断开，直接重启..."
-                force_restart
-            fi
+            log "🏃 运行中检测到VPN断开，直接重启..."
+            force_restart
         else
             log "✅ VPN连接状态正常"
         fi
     fi
     
-    # 5. 计算最小等待时间
+    # 6. 计算最小等待时间
     sleep_time=1
     [ $next_app_check -gt 0 ] && sleep_time=$next_app_check
     [ $next_vpn_check -gt 0 ] && [ $next_vpn_check -lt $sleep_time ] && sleep_time=$next_vpn_check
