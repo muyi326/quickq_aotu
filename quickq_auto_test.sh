@@ -1,238 +1,215 @@
 #!/bin/bash
 
 # ===== 配置参数 =====
-APP_NAME="QuickQ"
+APP_NAME="QuickQ For Mac"
 APP_PATH="/Applications/QuickQ For Mac.app"
 MAX_RETRY=3
-retry_count=0
-just_started=false
-last_restart_time=$(date +%s)
-RESTART_INTERVAL=$((4*3600))  # 4小时转换为秒数
-connection_verified=false
+RESTART_INTERVAL=7200  # 4小时（秒）
+APP_CHECK_INTERVAL=20   # 应用检测间隔（秒）
+VPN_CHECK_INTERVAL=600  # VPN检测间隔（秒）
 
-# 坐标参数
-DROP_DOWN_BUTTON_X=1720 # 下拉按钮X  1720在右边 200在左边
-DROP_DOWN_BUTTON_Y=430
-CONNECT_BUTTON_X=1720  # 连接按钮X。1720在右边 200在左边
-CONNECT_BUTTON_Y=260
-SETTINGS_BUTTON_X=1869  # 设置按钮X   1869在右边。349在左边
+# 按钮坐标（根据您的实际设置）
+SETTINGS_BUTTON_X=1869
 SETTINGS_BUTTON_Y=165
+DROP_DOWN_BUTTON_X=1720
+DROP_DOWN_BUTTON_Y=430
+CONNECT_BUTTON_X=1720
+CONNECT_BUTTON_Y=260
+
+# ===== 状态变量 =====
+retry_count=0
+is_fresh_start=false
+last_restart_time=$(date +%s)
+last_app_check_time=0
+last_vpn_check_time=0
+
+# ===== 带时间戳的输出函数 =====
+log() {
+    echo "[$(date +"%T")] $1"
+}
 
 # ===== 函数定义 =====
 
-# 打印预计重启时间
-print_restart_time() {
-    local current_time=$(date +%s)
-    local next_restart_time=$((last_restart_time + RESTART_INTERVAL))
-    local remaining_seconds=$((next_restart_time - current_time))
-    
-    if [ $remaining_seconds -le 0 ]; then
-        echo "[$(date +"%T")] ⏰ 即将执行定期重启..."
-        return
-    fi
-    
-    local remaining_hours=$((remaining_seconds / 3600))
-    local remaining_minutes=$(( (remaining_seconds % 3600) / 60 ))
-    local remaining_secs=$((remaining_seconds % 60))
-    
-    echo "[$(date +"%T")] ⏳ 预计重启时间: ${remaining_hours}小时${remaining_minutes}分钟${remaining_secs}秒后"
-}
-
-# VPN连接检测
-check_vpn_connection() {
-    # 如果刚启动应用，直接返回失败（不实际检查）
-    if $just_started; then
-        return 1
-    fi
-
-    local TEST_URLS=("https://x.com" "https://www.google.com")
-    local TIMEOUT=20
-    
-    for url in "${TEST_URLS[@]}"; do
-        if curl --silent --head --fail --max-time $TIMEOUT "$url" &> /dev/null; then
-            echo "[$(date +"%T")] 检测：VPN连接正常"
-            last_vpn_status="connected"
-            retry_count=0  # 成功时重置计数器
-            connection_verified=true
-            return 0
-        fi
-    done
-    
-    last_vpn_status="disconnected"
-    connection_verified=false
-    return 1
-}
-
-# 窗口调整 - 将窗口放在右上角
 adjust_window() {
-    osascript -e 'tell application "System Events" to set visible of process "QuickQ For Mac" to true'
-    
+    log "🔄 调整应用窗口位置..."
     osascript <<'EOF'
     tell application "System Events"
         tell process "QuickQ For Mac"
-            repeat 3 times
-                if exists window 1 then
-                    -- 使用固定坐标将窗口放在右上角
-                    -- 假设显示器分辨率为1920x1080，右上角坐标为(1520,0)
-                    set position of window 1 to {1520, 0}
-                    set size of window 1 to {400, 300}
-                    exit repeat
-                else
-                    delay 0.5
-                end if
-            end repeat
+            set position of window 1 to {1520, 0}
+            set size of window 1 to {400, 300}
         end tell
     end tell
 EOF
-    echo "[$(date +"%T")] 窗口位置已校准到右上角"
     sleep 1
+    log "✅ 窗口调整完成"
 }
 
-# 连接流程
-connect_procedure() {
-    echo "[$(date +"%T")] 启动连接流程..."
-    # 显示窗口并激活
-    osascript -e 'tell application "System Events" to set visible of process "QuickQ For Mac" to true'
-    osascript -e 'tell application "QuickQ For Mac" to activate'
-    sleep 2
-    
-    # 调整窗口并点击连接
-    adjust_window
-    cliclick c:${SETTINGS_BUTTON_X},${SETTINGS_BUTTON_Y}
-    echo "[$(date +"%T")] 已点击设置按钮"
-    sleep 1.5
-    
-    cliclick c:${DROP_DOWN_BUTTON_X},${DROP_DOWN_BUTTON_Y}
-    echo "[$(date +"%T")] 已点击下拉菜单"
-    sleep 1.5
-    
-    cliclick c:${CONNECT_BUTTON_X},${CONNECT_BUTTON_Y}
-    echo "[$(date +"%T")] 已发起连接请求"
-    sleep 10  # 等待连接建立
-    
-    # 连接后严格检查状态
-    if check_vpn_connection; then
-        echo "[$(date +"%T")] ✅ VPN连接成功"
-        connection_verified=true
+# ===== VPN 检测函数 =====
+check_vpn_connection() {
+    echo "[$(date +'%T')] 🔍 启动VPN通道检测..."
+    local start_time=$(date +%s)
+    local success=false
+
+    # 测试端点列表（轻量级204接口）
+    local endpoints=(
+        "https://www.google.com/generate_204"
+        "https://www.youtube.com/generate_204"
+    )
+
+    # 遍历检测所有端点
+    for url in "${endpoints[@]}"; do
+        domain=$(echo "$url" | awk -F/ '{print $3}')
+        echo "[$(date +'%T')]   🌐 正在测试 $domain ..."
+        
+        if curl --max-time 10 --silent --fail "$url" >/dev/null; then
+            echo "[$(date +'%T')]   ✅ $domain 检测通过 (204)"
+            success=true
+            break
+        else
+            echo "[$(date +'%T')]   ❌ $domain 检测失败 (curl代码: $?)"
+        fi
+    done
+
+    local end_time=$(date +%s)
+    local elapsed=$((end_time - start_time))
+
+    if $success; then
+        echo "[$(date +'%T')] 🟢 VPN通道正常 (耗时: ${elapsed}s)"
+        return 0
     else
-        echo "[$(date +"%T")] ❌ VPN连接失败"
-        connection_verified=false
+        echo "[$(date +'%T')] 🔴 VPN通道异常 (总耗时: ${elapsed}s)"
+        return 1
     fi
 }
 
-# 应用初始化
-initialize_app() {
-    echo "[$(date +"%T")] 执行初始化操作..."
-    just_started=true
-    connection_verified=false
-    osascript -e 'tell application "System Events" to set visible of process "QuickQ For Mac" to true'
-    osascript -e 'tell application "QuickQ For Mac" to activate'
-    sleep 3
+connect_procedure() {
+    log "🔌 启动VPN连接流程..."
     
-    adjust_window
-    cliclick c:${SETTINGS_BUTTON_X},${SETTINGS_BUTTON_Y}
-    echo "[$(date +"%T")] 已点击设置按钮"
-    sleep 2
-    
-    connect_procedure
-    just_started=false
-    last_restart_time=$(date +%s)
-    print_restart_time
-}
-
-# 终止并重启应用
-terminate_and_restart() {
-    echo "[$(date +"%T")] ⏰ 已达到4小时运行时间，执行定期重启..."
-    pkill -9 -f "$APP_NAME" && echo "[$(date +"%T")] 已终止进程"
-    sleep 2
-    
-    open "$APP_PATH"
-    echo "[$(date +"%T")] 重新启动应用中..."
-    sleep 10
-    
-    initialize_app
-}
-
-# 检查是否需要定期重启
-check_regular_restart() {
-    local current_time=$(date +%s)
-    local elapsed_seconds=$((current_time - last_restart_time))
-    
-    if [ $elapsed_seconds -ge $RESTART_INTERVAL ]; then
-        terminate_and_restart
-    fi
-}
-
-# ===== 依赖检查 =====
-if ! command -v cliclick &> /dev/null; then
-    echo "正在通过Homebrew安装cliclick..."
-    if ! command -v brew &> /dev/null; then
-        echo "错误：请先安装Homebrew (https://brew.sh)"
-        exit 1
-    fi
-    brew install cliclick
-    
-    # 触发权限请求
-    echo "[$(date +"%T")] 依赖安装完成，正在执行一次性权限触发操作..."
-    open "$APP_PATH"
-    sleep 5
+    # 激活窗口
+    log "🖥️ 激活应用窗口..."
     osascript -e 'tell application "QuickQ For Mac" to activate'
     sleep 1
+    
+    # 调整窗口
     adjust_window
-    cliclick c:${SETTINGS_BUTTON_X},${SETTINGS_BUTTON_Y}
-    echo "[$(date +"%T")] 已触发点击事件，请检查系统权限请求"
+    
+    # 连接操作
+    log "🖱️ 点击设置按钮 ($SETTINGS_BUTTON_X,$SETTINGS_BUTTON_Y)..."
+    cliclick c:$SETTINGS_BUTTON_X,$SETTINGS_BUTTON_Y
+    sleep 1
+    
+    log "🖱️ 点击下拉菜单 ($DROP_DOWN_BUTTON_X,$DROP_DOWN_BUTTON_Y)..."
+    cliclick c:$DROP_DOWN_BUTTON_X,$DROP_DOWN_BUTTON_Y 
+    sleep 1
+    
+    log "🖱️ 点击连接按钮 ($CONNECT_BUTTON_X,$CONNECT_BUTTON_Y)..."
+    cliclick c:$CONNECT_BUTTON_X,$CONNECT_BUTTON_Y
     sleep 10
-    pkill -9 -f "$APP_NAME"
-    exit 0
-fi
+    
+    # 检测连接结果
+    if check_vpn_connection; then
+        log "✅ VPN连接成功"
+        retry_count=0
+        is_fresh_start=false
+        return 0
+    else
+        ((retry_count++))
+        log "❌ VPN连接失败 (尝试 $retry_count/$MAX_RETRY)"
+        return 1
+    fi
+}
+
+force_restart() {
+    log "🔄 开始强制重启应用..."
+    log "⏹️ 终止进程..."
+    pkill -9 -f "$APP_NAME" && log "✅ 进程已终止"
+    sleep 2
+    
+    log "🚀 重新启动应用..."
+    open "$APP_PATH"
+    sleep 10
+    
+    is_fresh_start=true
+    retry_count=0
+    connect_procedure
+    last_restart_time=$(date +%s)
+    log "🔄 应用重启流程完成"
+}
 
 # ===== 主循环 =====
+log "🚀 启动QuickQ自动化管理脚本..."
+log "⏱️ 应用检测间隔: ${APP_CHECK_INTERVAL}秒 | VPN检测间隔: ${VPN_CHECK_INTERVAL}秒"
+
 while :; do
-    # 检查是否需要定期重启
-    check_regular_restart
+    current_time=$(date +%s)
     
-    if ! $just_started; then
-        if check_vpn_connection; then
-            echo "[$(date +"%T")] ✅ VPN已连接"
-            
-            # 每30秒检查程序是否运行
-            for ((i=0; i<20; i++)); do
-                check_regular_restart
-                print_restart_time
-                
-                if ! pgrep -f "$APP_NAME" &> /dev/null; then
-                    echo "[$(date +"%T")] ❌ 程序未运行，正在启动..."
-                    open "$APP_PATH"
-                    sleep 10
-                    initialize_app
-                    break
-                elif ! check_vpn_connection; then
-                    echo "[$(date +"%T")] ⚠️ VPN连接断开，尝试重新连接..."
-                    connect_procedure
-                else
-                    echo "[$(date +"%T")] ✅ 程序运行正常（VPN已连接）"
-                fi
-                sleep 30
-            done
-        else
-            echo "[$(date +"%T")] ❌ VPN未连接，尝试重连... ($((retry_count+1))/$MAX_RETRY)"
+    # 1. 计算下次检测时间
+    next_app_check=$((last_app_check_time + APP_CHECK_INTERVAL - current_time))
+    next_vpn_check=$((last_vpn_check_time + VPN_CHECK_INTERVAL - current_time))
+    
+    [ $next_app_check -lt 0 ] && next_app_check=0
+    [ $next_vpn_check -lt 0 ] && next_vpn_check=0
+    
+    log "⏳ 状态: [应用检测: ${next_app_check}秒后] [VPN检测: ${next_vpn_check}秒后]"
+    
+    # 2. 定期重启检查
+    restart_in=$((last_restart_time + RESTART_INTERVAL - current_time))
+    [ $restart_in -lt 0 ] && restart_in=0
+    log "🕒 下次定期重启: ${restart_in}秒后"
+    
+    if [ $restart_in -eq 0 ]; then
+        force_restart
+        continue
+    fi
+    
+    # 3. 应用运行检测
+    if [ $((current_time - last_app_check_time)) -ge $APP_CHECK_INTERVAL ]; then
+        log "🔍 开始应用运行状态检测..."
+        last_app_check_time=$(date +%s)
+        
+        if ! pgrep -f "$APP_NAME" >/dev/null; then
+            log "❌ 检测到应用未运行，正在启动..."
+            open "$APP_PATH"
+            sleep 10
+            is_fresh_start=true
+            retry_count=0
             connect_procedure
-            
-            # 检查是否重连成功
-            if ! check_vpn_connection; then
-                ((retry_count++))
-                echo "[$(date +"%T")] ⚠️ 第${retry_count}次重试失败"
-                
-                if [ $retry_count -ge $MAX_RETRY ]; then
-                    terminate_and_restart
-                    retry_count=0
-                fi
-            else
-                retry_count=0
-            fi
+            continue
+        else
+            log "✔️ 应用运行正常"
         fi
     fi
     
-    print_restart_time
-    sleep 10
+    # 4. VPN状态检测
+    if [ $((current_time - last_vpn_check_time)) -ge $VPN_CHECK_INTERVAL ]; then
+        log "🌐 开始VPN连接状态检测..."
+        last_vpn_check_time=$(date +%s)
+        
+        if ! check_vpn_connection; then
+            if $is_fresh_start; then
+                # 新启动应用：给3次连接机会
+                if [ $retry_count -lt $MAX_RETRY ]; then
+                    log "🔄 新启动应用连接失败，立即重试 ($((retry_count+1))/$MAX_RETRY)..."
+                    connect_procedure
+                else
+                    log "⚠️ 达到最大重试次数，强制重启..."
+                    force_restart
+                fi
+            else
+                # 运行中检测失败：直接重启
+                log "🏃 运行中检测到VPN断开，直接重启..."
+                force_restart
+            fi
+        else
+            log "✅ VPN连接状态正常"
+        fi
+    fi
+    
+    # 5. 计算最小等待时间
+    sleep_time=1
+    [ $next_app_check -gt 0 ] && sleep_time=$next_app_check
+    [ $next_vpn_check -gt 0 ] && [ $next_vpn_check -lt $sleep_time ] && sleep_time=$next_vpn_check
+    
+    log "⏸️ 等待${sleep_time}秒后继续..."
+    sleep $sleep_time
 done
