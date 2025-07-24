@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# ===== 依赖检查 =====
-check_dependencies() {
+# ===== 依赖检查与安装 =====
+check_and_install_dependencies() {
     log "🔍 检查系统依赖..."
     local missing_deps=()
     
@@ -18,35 +18,54 @@ check_dependencies() {
     # 如果有缺失的依赖
     if [ ${#missing_deps[@]} -gt 0 ]; then
         log "⚠️ 缺少必要依赖: ${missing_deps[*]}"
+        log "🔄 尝试自动安装缺失依赖..."
         
-        # 尝试自动安装cliclick(其他工具通常是系统自带)
+        # 特殊处理 cliclick
         if [[ " ${missing_deps[@]} " =~ " cliclick " ]]; then
-            log "尝试安装cliclick..."
-            if command -v brew &> /dev/null; then
-                log "使用Homebrew安装cliclick..."
-                brew install cliclick
-                if [ $? -eq 0 ]; then
-                    log "✅ cliclick安装成功"
-                    # 从缺失列表中移除
-                    missing_deps=("${missing_deps[@]/cliclick}")
-                else
-                    log "❌ cliclick安装失败"
-                fi
+            install_cliclick
+            # 检查是否安装成功
+            if command -v cliclick &> /dev/null; then
+                log "✅ cliclick 安装成功"
+                missing_deps=("${missing_deps[@]/cliclick}")
             else
-                log "❌ 未找到Homebrew，无法自动安装cliclick"
-                log "请手动安装: https://www.bluem.net/en/projects/cliclick/"
+                log "❌ cliclick 安装失败"
+            fi
+        fi
+        
+        # 特殊处理 curl (极少数情况可能没有)
+        if [[ " ${missing_deps[@]} " =~ " curl " ]]; then
+            log "安装 curl..."
+            if command -v brew &> /dev/null; then
+                brew install curl
+            elif command -v apt-get &> /dev/null; then
+                sudo apt-get install -y curl
+            elif command -v yum &> /dev/null; then
+                sudo yum install -y curl
+            else
+                log "❌ 无法识别包管理器来安装curl"
+            fi
+            
+            if command -v curl &> /dev/null; then
+                log "✅ curl 安装成功"
+                missing_deps=("${missing_deps[@]/curl}")
+            else
+                log "❌ curl 安装失败"
             fi
         fi
         
         # 如果还有缺失的依赖
         if [ ${#missing_deps[@]} -gt 0 ]; then
-            log "❌ 请先安装以下依赖:"
+            log "❌ 以下依赖自动安装失败，请手动安装:"
             for dep in "${missing_deps[@]}"; do
                 case $dep in
-                    "osascript") log "  - osascript: 通常是macOS系统自带" ;;
-                    "curl") log "  - curl: 通常是系统自带，或通过brew安装" ;;
-                    "pgrep"|"pkill") log "  - $dep: 通常是系统自带" ;;
-                    "cliclick") log "  - cliclick: 可通过brew安装或从官网下载" ;;
+                    "osascript") log "  - osascript: 这是macOS系统组件，通常应该已安装" ;;
+                    "curl") log "  - curl: 请通过系统包管理器安装" ;;
+                    "pgrep"|"pkill") log "  - $dep: 这是基本系统工具，通常应该已安装" ;;
+                    "cliclick") 
+                        log "  - cliclick: 请手动安装:"
+                        log "     1. 下载: sudo curl -L https://www.bluem.net/files/cliclick/latest/cliclick -o /usr/local/bin/cliclick"
+                        log "     2. 授权: sudo chmod +x /usr/local/bin/cliclick"
+                        ;;
                     *) log "  - $dep: 未知依赖" ;;
                 esac
             done
@@ -55,6 +74,43 @@ check_dependencies() {
     fi
     
     log "✅ 所有依赖已满足"
+}
+
+install_cliclick() {
+    log "尝试安装 cliclick..."
+    
+    # 方法1: 直接下载
+    log "尝试直接下载安装..."
+    if sudo curl -L https://www.bluem.net/files/cliclick/latest/cliclick -o /usr/local/bin/cliclick 2>/dev/null; then
+        sudo chmod +x /usr/local/bin/cliclick
+        return 0
+    fi
+    
+    # 方法2: 通过Homebrew安装
+    log "尝试通过Homebrew安装..."
+    if ! command -v brew &>/dev/null; then
+        log "Homebrew未安装，尝试安装Homebrew..."
+        if /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
+            log "✅ Homebrew安装成功"
+            # 确保brew在PATH中
+            if [[ -f /opt/homebrew/bin/brew ]]; then
+                eval "$(/opt/homebrew/bin/brew shellenv)"
+            elif [[ -f /usr/local/bin/brew ]]; then
+                eval "$(/usr/local/bin/brew shellenv)"
+            fi
+        else
+            log "❌ Homebrew安装失败"
+            return 1
+        fi
+    fi
+    
+    if command -v brew &>/dev/null; then
+        if brew install cliclick; then
+            return 0
+        fi
+    fi
+    
+    return 1
 }
 
 # ===== 配置参数 =====
@@ -215,8 +271,8 @@ force_restart() {
 # ===== 主程序 =====
 log "🚀 启动QuickQ自动化管理脚本..."
 
-# 首先检查依赖
-check_dependencies
+# 首先检查并安装依赖
+check_and_install_dependencies
 
 log "⏱️ 应用检测间隔: ${APP_CHECK_INTERVAL}秒 | VPN检测间隔: ${VPN_CHECK_INTERVAL}秒"
 
